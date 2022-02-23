@@ -1,0 +1,5 @@
+defpackage utf8/test:
+  import core
+  import utf8
+
+utf8-string-from-codepoints([0x65E5 0x672C 0x8A9E])

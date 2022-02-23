@@ -1,0 +1,60 @@
+defpackage utf8/utils:
+  import core
+
+public defn skip<?T, ?U> (s: ?T&Seq<?U>, n: Int) -> T:
+  for _ in 0 to n do:
+    next(s)
+  s
+
+public defn map?<?T, ?U> (v?: Maybe<?T>, f: T -> ?U) -> Maybe<U>:
+  match(v?):
+    (v: One): One(f(value!(v)))
+    (_: None): None()
+
+public defn flat-map?<?T, ?U> (v?: Maybe<?T>, f: T -> Maybe<?U>) -> Maybe<U>:
+  match(v?):
+    (v: One): f(value!(v))
+    (_: None): None()
+
+public defn value-or-else<?T> (v?: Maybe<?T>, f: () -> T) -> T:
+  match(v?):
+    (v: One): value!(v)
+    (_: None): f()
+
+public defn filter<?T> (v?: Maybe<?T>, pred: T -> True|False) -> Maybe<T>:
+  match(v?):
+    (v: One): One(value!(v)) when pred(value!(v)) else None()
+    (_: None): None()
+
+public defstruct Hex32 <: Printable: (n: Int)
+defmethod print (o: OutputStream, h: Hex32) -> False:
+  print(o, to-hex-digit $ to-byte $ (n(h) >> 28) & 0xF)
+  print(o, to-hex-digit $ to-byte $ (n(h) >> 24) & 0xF)
+  print(o, to-hex-digit $ to-byte $ (n(h) >> 20) & 0xF)
+  print(o, to-hex-digit $ to-byte $ (n(h) >> 16) & 0xF)
+  print(o, to-hex-digit $ to-byte $ (n(h) >> 12) & 0xF)
+  print(o, to-hex-digit $ to-byte $ (n(h) >>  8) & 0xF)
+  print(o, to-hex-digit $ to-byte $ (n(h) >>  4) & 0xF)
+  print(o, to-hex-digit $ to-byte $ (n(h)      ) & 0xF)
+
+public defstruct Hex8 <: Printable: (n: Byte)
+defmethod print (o: OutputStream, h: Hex8) -> False:
+  print(o, to-hex-digit $ n(h) >> 4Y)
+  print(o, to-hex-digit $ n(h) & 0xFY)
+
+defn to-hex-digit (b: Byte) -> Char:
+  if       0Y <= b and b < 10Y: to-char(to-byte('0') + b)
+  else if 10Y <= b and b < 16Y: to-char(to-byte('A') + (b - 10Y))
+  else: fatal("not a hex digit")
+
+defstruct Bits32: (n: Int)
+defmethod print (o: OutputStream, b: Bits32) -> False:
+  for (bits in 0 to false, i in 31 through 0 by -1) do:
+    if bits != 0 and bits % 8 == 0:
+      print(o, " ")
+    print(o, (n(b) >> i) & 1)
+
+defstruct Bits8: (n: Byte)
+defmethod print (o: OutputStream, b: Bits8) -> False:
+  for i in 7 through 0 by -1 do:
+    print(o, (n(b) >> to-byte(i)) & 1Y)

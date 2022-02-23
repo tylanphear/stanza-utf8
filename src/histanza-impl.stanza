@@ -1,0 +1,158 @@
+defpackage utf8/histanza-impl:
+  import core
+  import utf8/utils
+
+defn index-bits (n: Int, start: Int, end: Int) -> Int:
+  ((n & start-mask) & end-mask) >> start
+where:
+  val start-mask = (~ 0) << start
+  val end-mask   = (~ 0) >> (32 - end)
+
+defn sequence-length? (b: Byte) -> Maybe<Int>:
+  switch(count-leading-ones(b)):
+    0: One(1)
+    2: One(2)
+    3: One(3)
+    4: One(4)
+    else: None()
+
+defn count-leading-ones (b: Byte) -> Int:
+  let loop (needle: Byte = 0b10000000Y, ones: Int = 0):
+    if (b & needle) != 0Y:
+      loop(needle >> 1Y, ones + 1)
+    else:
+      ones
+
+defn codepoint-to-octets (codepoint: Int) -> Maybe<Tuple<Byte>>:
+  switch {_}:
+    codepoint < 0x80: One([to-byte(codepoint)])
+    codepoint < 0x800: One $ [
+      to-byte(0b11000000 | index-bits(codepoint, 6, 11)),
+      to-byte(0b10000000 | index-bits(codepoint, 0, 6)),
+    ]
+    codepoint < 0x10000: One $ [
+      to-byte(0b11100000 | index-bits(codepoint, 12, 16)),
+      to-byte(0b10000000 | index-bits(codepoint, 6, 12)),
+      to-byte(0b10000000 | index-bits(codepoint, 0, 6)),
+    ]
+    codepoint < 0x110000: One $ [
+      to-byte(0b11110000 | index-bits(codepoint, 18, 21)),
+      to-byte(0b10000000 | index-bits(codepoint, 12, 18)),
+      to-byte(0b10000000 | index-bits(codepoint, 6, 12)),
+      to-byte(0b10000000 | index-bits(codepoint, 0, 6)),
+    ]
+    else: None()
+
+defn decode-one-codepoint (bytes: Seq<Byte>) -> Maybe<Int>:
+  label<Maybe<Int>> return:
+    defn invalid! ():
+      return(None())
+    defn next-or-invalid! (bytes: Seq<Byte>):
+      next(bytes) when peek(bytes) is Byte else invalid!()
+
+    val first = next(bytes)
+    val sequence-length = sequence-length?(first) $> value-or-else{_, invalid!}
+
+    ; TODO: optimize this (later)
+    One $ switch(sequence-length):
+      1:
+        to-int(first)
+      2:
+        val second = next(bytes)
+        if not valid-two-byte-sequence?(first, second): invalid!()
+        val upper-half = to-int(first  & 0b00011111Y) << 6
+        val lower-half = to-int(second & 0b00111111Y)
+        upper-half | lower-half
+      3:
+        val [second, third] = [next(bytes), next(bytes)]
+        if not valid-three-byte-sequence?(first, second, third): invalid!()
+        val upper-third  = to-int(first       & 0b00011111Y) << 12
+        val middle-third = to-int(second      & 0b00111111Y) << 6
+        val bottom-third = to-int(third       & 0b00111111Y)
+        upper-third | middle-third | bottom-third
+      4:
+        val [second, third, fourth] = [next(bytes), next(bytes), next(bytes)]
+        if not valid-four-byte-sequence?(first, second, third, fourth): invalid!()
+        val top-fourth           = to-int(first  & 0b00001111Y) << 18
+        val top-middle-fourth    = to-int(second & 0b00111111Y) << 12
+        val bottom-middle-fourth = to-int(third  & 0b00111111Y) << 6
+        val bottom-fourth        = to-int(fourth & 0b00111111Y)
+        top-fourth | top-middle-fourth | bottom-middle-fourth | bottom-fourth
+
+defn decode-one-codepoint! (bytes: Seq<Byte>) -> Int:
+  value!(decode-one-codepoint(bytes))
+
+defn in-range? (b: Byte, start: Byte, end: Byte) -> True|False:
+  start <= b and b <= end
+
+defn valid-two-byte-sequence? (b1: Byte, b2: Byte) -> True|False:
+  in-range?(b1, 0xC2Y, 0xDFY) and in-range?(b2, 0x80Y, 0xBFY)
+
+defn valid-three-byte-sequence? (b1: Byte, b2: Byte, b3: Byte) -> True|False:
+  if      b1 == 0xE0Y: (in-range?(b2, 0xA0Y, 0xBFY) and utf8-tail?(b3))
+  else if b1 == 0xEDY: (in-range?(b2, 0x80Y, 0x9FY) and utf8-tail?(b3))
+  else if in-range?(b1, 0xE1Y, 0xECY): (utf8-tail?(b2) and utf8-tail?(b3))
+  else if in-range?(b1, 0xEEY, 0xEFY): (utf8-tail?(b2) and utf8-tail?(b3))
+  else: false
+
+defn valid-four-byte-sequence? (b1: Byte, b2: Byte, b3: Byte, b4: Byte) -> True|False:
+  if      b1 == 0xF0Y: (in-range?(b2, 0x90Y, 0xBFY) and utf8-tail?(b3) and utf8-tail?(b4))
+  else if b1 == 0xF4Y: (in-range?(b2, 0x80Y, 0x8FY) and utf8-tail?(b3) and utf8-tail?(b4))
+  else if in-range?(b1, 0xF1Y, 0xF3Y): (utf8-tail?(b2) and utf8-tail?(b3) and utf8-tail?(b4))
+
+defn utf8-tail? (b: Byte):
+  in-range?(b, 0x80Y, 0xBFY)
+
+defstruct UtfChar <: Printable: (codepoint: Int)
+defmethod print (o: OutputStream, c: UtfChar) -> False:
+  val octets = value! $ codepoint-to-octets $ codepoint(c)
+  for octet in octets do:
+    print(o, to-char(octet))
+
+defn utf-char-from-bytes (bytes: Tuple<Byte>) -> Maybe<UtfChar>:
+  One(bytes)
+    $> filter{_, {length(_) > 4}}
+    $> flat-map?{_, {decode-one-codepoint(to-seq(_))}}
+    $> map?{_, UtfChar}
+
+deftype Utf8String <: Printable
+defmulti bytes (s: Utf8String) -> Seq<Byte>
+defmulti chars (s: Utf8String) -> Seq<UtfChar>
+
+defn Utf8String (bytes: Tuple<Byte>):
+  new Utf8String:
+    defmethod print (o: OutputStream, this):
+      for byte in bytes do:
+        print(o, to-char(byte))
+
+    defmethod bytes (this):
+      to-seq(bytes)
+
+    defmethod chars (this):
+      generate<UtfChar>:
+        val bytes = /bytes(this)
+        while not empty?(bytes):
+          yield(UtfChar(decode-one-codepoint!(bytes)))
+
+defn add (s: Utf8String, c: UtfChar) -> Utf8String:
+  cat-all([
+    bytes(s),
+    value!(codepoint-to-octets(codepoint(c))),
+  ])
+    $> to-tuple
+    $> Utf8String
+
+defn skip-one-codepoint (bytes: Seq<Byte>) -> Seq<Byte>:
+  val length? = value! $ sequence-length?(peek(bytes))
+  skip(bytes, length?)
+
+defn nth? (s: Utf8String, n: Int) -> Maybe<UtfChar>:
+  let loop (i: Int = 0, bytes: Seq<Byte> = bytes(s)):
+    if i < n and not empty?(bytes):
+      loop(i + 1, skip-one-codepoint(bytes))
+    else:
+      map?{_, UtfChar} $ decode-one-codepoint(bytes)
+
+defn utf8-string-from-codepoints (codepoints: Tuple<Int>) -> Utf8String:
+  Utf8String $ to-tuple $ for codepoint in codepoints seq-cat:
+    codepoint-to-octets(codepoint) $> value!

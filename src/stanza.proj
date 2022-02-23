@@ -1,0 +1,4 @@
+package utf8 defined-in "lib.stanza"
+package utf8/histanza-impl defined-in "histanza-impl.stanza"
+package utf8/utils defined-in "utils.stanza"
+package utf8/test defined-in "test.stanza"

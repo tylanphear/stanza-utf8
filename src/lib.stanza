@@ -1,0 +1,442 @@
+defpackage utf8:
+  import core
+  import collections
+  import utf8/utils
+
+public val test-string = Utf8String([0xc3Y 0xb0Y 0xc9Y 0xaaY 0x73Y])
+
+lostanza defn index-bits (n: int, start: int, end: int) -> int:
+  val start-mask = (~ 0) << start
+  val end-mask   = (~ 0) >> (32 - end)
+  return ((n & start-mask) & end-mask) >> start
+
+lostanza defn num-bytes-for-codepoint? (b: ref<Byte>) -> ref<Maybe<Int>>:
+  val ret = num-bytes-for-codepoint(b.value)
+  if ret == -1:
+    return None()
+  else:
+    return One(new Int{ret})
+
+lostanza deftype Utf8String <: Equalable & Printable:
+  length: long
+  var bytes: byte ...
+
+lostanza defn validate-utf8-buffer (bytes: ptr<byte>, length: long) -> long:
+
+lostanza defn Utf8String-unchecked (bytes: ptr<byte>, length: long) -> ref<Utf8String>:
+  val ret = new Utf8String{length}
+  call-c clib/memcpy(addr!(ret.bytes), bytes, length)
+  return ret
+
+lostanza defn Utf8String (bytes: ptr<byte>, length: long) -> ref<Utf8String>:
+  if validate-utf8-buffer(bytes, length) == 0L:
+    throw(new Utf8DecodeError{"invalid utf8 string given"})
+  return Utf8String-unchecked(bytes, length)
+
+lostanza defn to-utf8-string-and-free (bytes: ptr<byte>, length: long) -> ref<Utf8String>:
+  val ret = Utf8String(bytes, length)
+  call-c clib/free(bytes)
+  return ret
+
+lostanza defn Utf8String (bytes: ref<Tuple<Byte>>) -> ref<Utf8String>:
+  val len = length(bytes).value as long
+  val buffer: ptr<byte> = call-c clib/stz_malloc(len)
+  for (var i: long = 0, i < len, i = i + 1):
+    buffer[i] = get(bytes, new Int{i as int}).value
+  return to-utf8-string-and-free(buffer, len)
+
+defmethod equal? (a: Utf8String, b: Utf8String) -> True|False:
+  let loop (a-bytes = bytes(a), b-bytes = bytes(b)):
+    if empty?(a-bytes) and empty?(b-bytes):
+      true
+    else if not empty?(a-bytes) and not empty?(b-bytes):
+      if next(a-bytes) == next(b-bytes):
+        loop(a-bytes, b-bytes)
+      else:
+        false
+    else:
+      false
+
+lostanza defmethod print (o: ref<OutputStream>, s: ref<Utf8String>) -> ref<False>:
+  for (var i: long = 0, i < s.length, i = i + 1):
+    print(o, new Char{s.bytes[i]})
+  return false
+
+lostanza deftype UtfChar <: Equalable & Printable:
+  codepoint: int
+
+lostanza defn UtfChar (codepoint: int) -> ref<UtfChar>:
+  return new UtfChar{codepoint}
+
+lostanza defn UtfChar (codepoint: ref<Int>) -> ref<UtfChar>:
+  return UtfChar(codepoint.value)
+
+lostanza defmethod equal? (a: ref<UtfChar>, b: ref<UtfChar>) -> ref<True|False>:
+  if a.codepoint == b.codepoint:
+    return true
+  else:
+    return false
+
+lostanza deftype Octets:
+  length: long
+  var bytes: byte ...
+
+lostanza defn codepoint-to-octets (codepoint: int) -> ref<Octets>:
+  if codepoint < 0x80:
+    val octets = new Octets{1}
+    octets.bytes[0] = codepoint as byte
+    return octets
+  else if codepoint < 0x800:
+    val octets = new Octets{2}
+    octets.bytes[0] = (0b11000000 | index-bits(codepoint, 6, 11)) as byte
+    octets.bytes[1] = (0b10000000 | index-bits(codepoint, 0,  6)) as byte
+    return octets
+  else if codepoint < 0x10000:
+    val octets = new Octets{3}
+    octets.bytes[0] = (0b11100000 | index-bits(codepoint, 12, 16)) as byte
+    octets.bytes[1] = (0b10000000 | index-bits(codepoint,  6, 12)) as byte
+    octets.bytes[2] = (0b10000000 | index-bits(codepoint,  0,  6)) as byte
+    return octets
+  else if codepoint < 0x110000:
+    val octets = new Octets{4}
+    octets.bytes[0] = (0b11110000 | index-bits(codepoint, 18, 21)) as byte
+    octets.bytes[1] = (0b10000000 | index-bits(codepoint, 12, 18)) as byte
+    octets.bytes[2] = (0b10000000 | index-bits(codepoint,  6, 12)) as byte
+    octets.bytes[3] = (0b10000000 | index-bits(codepoint,  0,  6)) as byte
+    return octets
+  else:
+    return new Octets{0}
+
+lostanza defn bytes (c: ref<UtfChar>) -> ref<Tuple<Byte>>:
+  val octets = codepoint-to-octets(c.codepoint)
+  val ret = new Tuple<Byte>{octets.length}
+  for (var i: long = 0, i < octets.length, i = i + 1):
+    ret.items[i] = new Byte{octets.bytes[i]}
+  return ret
+
+lostanza defmethod print (o: ref<OutputStream>, c: ref<UtfChar>) -> ref<False>:
+  val octets = codepoint-to-octets(c.codepoint)
+  for (var i: long = 0, i < octets.length, i = i + 1):
+    print(o, new Char{octets.bytes[i]})
+  return false
+
+lostanza defn num-octets-for-codepoint (codepoint: int) -> long:
+  if      codepoint <     0x80: return 1L
+  else if codepoint <    0x800: return 2L
+  else if codepoint <  0x10000: return 3L
+  else if codepoint < 0x110000: return 4L
+  else: return -1L
+
+lostanza defn num-octets-for-codepoints (buffer: ptr<int>, len: long) -> long:
+  var total: long = 0
+  for (var i: long = 0, i < len, i = i + 1):
+    total = total + num-octets-for-codepoint(buffer[i])
+  return total
+
+lostanza defn utf8-string-from-codepoints (buffer: ptr<int>, len: long) -> ref<Utf8String>:
+  val num-octets = num-octets-for-codepoints(buffer, len)
+  val octet-buffer: ptr<byte> = call-c clib/stz_malloc(num-octets)
+  var c: long = 0
+  for (var i: long = 0, i < len, i = i + 1):
+    val octets = codepoint-to-octets(buffer[i])
+    copy-octets(octets, c, octet-buffer)
+    c = c + octets.length
+  val ret = Utf8String(octet-buffer, num-octets)
+  call-c clib/stz_free(octet-buffer)
+  return ret
+
+lostanza defn copy-octets (octets: ref<Octets>, index: long, buffer: ptr<byte>) -> ref<False>:
+  switch(octets.length):
+    1:
+      buffer[index + 0] = octets.bytes[0]
+    2:
+      buffer[index + 0] = octets.bytes[0]
+      buffer[index + 1] = octets.bytes[1]
+    3:
+      buffer[index + 0] = octets.bytes[0]
+      buffer[index + 1] = octets.bytes[1]
+      buffer[index + 2] = octets.bytes[2]
+    4:
+      buffer[index + 0] = octets.bytes[0]
+      buffer[index + 1] = octets.bytes[1]
+      buffer[index + 2] = octets.bytes[2]
+      buffer[index + 3] = octets.bytes[3]
+  return false
+
+public lostanza defn utf8-string-from-codepoints (codepoints: ref<Tuple<Int>>) -> ref<Utf8String>:
+  val buffer: ptr<int> = call-c clib/stz_malloc(codepoints.length)
+  for (var i: long = 0, i < codepoints.length, i = i + 1):
+    buffer[i] = get(codepoints, new Int{i as int}).value
+  val ret = utf8-string-from-codepoints(buffer, codepoints.length)
+  call-c clib/stz_free(buffer)
+  return ret
+
+lostanza defn num-bytes-for-codepoint (b: byte) -> int:
+  switch(count-leading-ones(b)):
+    0: return 1
+    2: return 2
+    3: return 3
+    4: return 4
+    else: return -1
+
+lostanza defn count-leading-ones (b: byte) -> int:
+  labels:
+    begin:
+      goto loop(0b10000000Y, 0)
+    loop (needle: byte, ones: int):
+      if (b & needle) != 0Y:
+        goto loop(needle >> 1Y, ones + 1)
+      else:
+        return ones
+
+lostanza deftype Bytes <: Seq<Byte> & Lengthable:
+  var index: long
+  s: ref<Utf8String>
+
+public lostanza defn bytes (s: ref<Utf8String>) -> ref<Bytes>:
+  return new Bytes{0, s}
+
+lostanza defmethod length (b: ref<Bytes>) -> ref<Int>:
+  return new Int{b.s.length as int}
+
+lostanza defmethod empty? (b: ref<Bytes>) -> ref<True|False>:
+  if b.index < b.s.length:
+    return false
+  else:
+    return true
+
+lostanza defmethod next (b: ref<Bytes>) -> ref<Byte>:
+  val byte = peek(b)
+  b.index = b.index + 1
+  return byte
+
+lostanza defmethod peek (b: ref<Bytes>) -> ref<Byte>:
+  return new Byte{b.s.bytes[b.index]}
+
+lostanza deftype Chars <: Seq<UtfChar> & Lengthable:
+  var offset: long
+  s: ref<Utf8String>
+
+public lostanza defn chars (s: ref<Utf8String>) -> ref<Chars>:
+  return new Chars{0, s}
+
+lostanza defmethod empty? (b: ref<Chars>) -> ref<True|False>:
+  if b.offset < b.s.length:
+    return false
+  else:
+    return true
+
+lostanza defmethod length (b: ref<Chars>) -> ref<Int>:
+  labels:
+    begin:
+      goto loop(0, 0)
+    loop (total: long, offset: long):
+      if offset < b.s.length:
+        goto loop(total + 1, offset + num-bytes-for-codepoint(b.s.bytes[offset]))
+      return new Int{total as int}
+
+lostanza defmethod next (b: ref<Chars>) -> ref<UtfChar>:
+  val ret = peek(b)
+  b.offset = b.offset + num-octets-for-codepoint(ret.codepoint)
+  return ret
+
+lostanza defmethod peek (b: ref<Chars>) -> ref<UtfChar>:
+  val codepoint = decode-one-codepoint!(addr!(b.s.bytes[b.offset]))
+  return new UtfChar{codepoint as int}
+
+lostanza defn skip (c: ref<Chars>, n: long) -> ref<Chars>:
+  for (var i: long = 0, i < n, i = i + 1):
+    if c.offset > c.s.length:
+      return c
+    c.offset = c.offset + num-bytes-for-codepoint(c.s.bytes[c.offset])
+  return c
+
+lostanza deftype Utf8DecodeError <: Exception & Printable:
+  msg: ptr<byte>
+
+lostanza deftype Utf8DecodeErrorAtIndex <: Exception & Printable:
+  msg: ptr<byte>
+  index: long
+
+lostanza defmethod print (o: ref<OutputStream>, e: ref<Utf8DecodeError>) -> ref<False>:
+  print(o, String("error decoding: "))
+  print(o, String(e.msg))
+  return false
+
+lostanza defmethod print (o: ref<OutputStream>, e: ref<Utf8DecodeErrorAtIndex>) -> ref<False>:
+  print(o, String("error decoding at index `"))
+  print(o, new Long{e.index})
+  print(o, String("`: "))
+  print(o, String(e.msg))
+  return false
+
+lostanza deftype ByteIterator:
+  var index: long
+  len: long
+  buffer: ptr<byte>
+
+lostanza defn empty? (it: ref<ByteIterator>) -> long:
+  return it.index >= it.len
+
+lostanza defn peek (it: ref<ByteIterator>) -> byte:
+  if empty?(it):
+    throw(new Utf8DecodeErrorAtIndex{"no more bytes", it.index})
+  return it.buffer[it.index]
+
+lostanza defn next (it: ref<ByteIterator>) -> byte:
+  val ret = peek(it)
+  it.index = it.index + 1
+  return ret
+
+lostanza defn skip (it: ref<ByteIterator>, length: int) -> ref<ByteIterator>:
+  for (var i: int = 0, i < length, i = i + 1):
+    next(it)
+  return it
+
+lostanza defn skip-one-codepoint (bytes: ref<ByteIterator>) -> ref<ByteIterator>:
+  val length? = num-bytes-for-codepoint(peek(bytes))
+  if length? == -1:
+    throw(new Utf8DecodeError{"decoding bytes: invalid codepoint"})
+  return skip(bytes, length?)
+
+lostanza defn decode-one-codepoint! (bytes: ptr<byte>) -> int:
+  val codepoint? = decode-one-codepoint(bytes)
+  if codepoint? == -1L:
+    throw(new Utf8DecodeError{"decoding bytes: invalid codepoint"})
+  return codepoint? as int
+
+lostanza defn decode-one-codepoint (bytes: ptr<byte>) -> long:
+  val length = num-bytes-for-codepoint(bytes[0])
+  ; TODO: optimize this (later)
+  if length == 1:
+    val first = bytes[0]
+    return first as long
+  else if length == 2:
+    val first = bytes[0]
+    val second = bytes[1]
+    if valid-two-byte-sequence?(first, second) == 0L: return -1
+    val upper-half = ((first  & 0b00011111Y) as int) << 6
+    val lower-half = ((second & 0b00111111Y) as int)
+    return upper-half | lower-half
+  else if length == 3:
+    val first = bytes[0]
+    val second = bytes[1]
+    val third  = bytes[2]
+    if valid-three-byte-sequence?(first, second, third) == 0L: return -1L
+    val upper-third  = ((first  & 0b00011111Y) as int) << 12
+    val middle-third = ((second & 0b00111111Y) as int) << 6
+    val bottom-third = ((third  & 0b00111111Y) as int)
+    return (upper-third | middle-third | bottom-third) as long
+  else if length == 4:
+    val first = bytes[0]
+    val second = bytes[1]
+    val third  = bytes[2]
+    val fourth = bytes[3]
+    if valid-four-byte-sequence?(first, second, third, fourth) == 0L: return -1L
+    val top-fourth           = ((first  & 0b00001111Y) as int) << 18
+    val top-middle-fourth    = ((second & 0b00111111Y) as int) << 12
+    val bottom-middle-fourth = ((third  & 0b00111111Y) as int) << 6
+    val bottom-fourth        = ((fourth & 0b00111111Y) as int)
+    return (top-fourth | top-middle-fourth | bottom-middle-fourth | bottom-fourth) as long
+  else:
+    return -1L
+
+lostanza defn decode-one-codepoint (bytes: ref<ByteIterator>) -> long:
+  if empty?(bytes): return -1L
+  return decode-one-codepoint(addr!(bytes.buffer[bytes.index]))
+
+lostanza defn decode-one-codepoint! (bytes: ref<ByteIterator>) -> int:
+  val ret = decode-one-codepoint(bytes)
+  if ret == -1L:
+    throw(new Utf8DecodeErrorAtIndex{"decoding bytes: invalid codepoint", bytes.index})
+  return ret as int
+
+lostanza defn valid-two-byte-sequence? (b1: byte, b2: byte) -> long:
+  return in-range?(b1, 0xC2Y, 0xDFY) and in-range?(b2, 0x80Y, 0xBFY)
+
+lostanza defn valid-three-byte-sequence? (b1: byte, b2: byte, b3: byte) -> long:
+  if      b1 == 0xE0Y: return (in-range?(b2, 0xA0Y, 0xBFY) and utf8-tail?(b3))
+  else if b1 == 0xEDY: return (in-range?(b2, 0x80Y, 0x9FY) and utf8-tail?(b3))
+  else if in-range?(b1, 0xE1Y, 0xECY): return (utf8-tail?(b2) and utf8-tail?(b3))
+  else if in-range?(b1, 0xEEY, 0xEFY): return (utf8-tail?(b2) and utf8-tail?(b3))
+  else: return 0L
+
+lostanza defn valid-four-byte-sequence? (b1: byte, b2: byte, b3: byte, b4: byte) -> long:
+  if      b1 == 0xF0Y: return (in-range?(b2, 0x90Y, 0xBFY) and utf8-tail?(b3) and utf8-tail?(b4))
+  else if b1 == 0xF4Y: return (in-range?(b2, 0x80Y, 0x8FY) and utf8-tail?(b3) and utf8-tail?(b4))
+  else if in-range?(b1, 0xF1Y, 0xF3Y): return (utf8-tail?(b2) and utf8-tail?(b3) and utf8-tail?(b4))
+  else: return 0L
+
+lostanza defn in-range? (b: byte, start: byte, end: byte) -> long:
+  return start <= b and b <= end
+
+lostanza defn utf8-tail? (b: byte) -> long:
+  return in-range?(b, 0x80Y, 0xBFY)
+
+lostanza defn nth? (s: ref<Utf8String>, n: int) -> ref<Maybe<UtfChar>>:
+  labels:
+    begin:
+      goto loop(0, new ByteIterator{0, s.length, addr!(s.bytes)})
+    loop (i: int, bytes: ref<ByteIterator>):
+      if empty?(bytes):
+        return None()
+      else if i < n:
+        goto loop(i + 1, skip-one-codepoint(bytes))
+      else:
+        return One(UtfChar(decode-one-codepoint!(bytes)))
+
+lostanza defn nth? (s: ref<Utf8String>, n: ref<Int>) -> ref<Maybe<UtfChar>>:
+  return nth?(s, n.value)
+
+lostanza defn substr (s: ref<Utf8String>, start: long, end: long) -> ref<Utf8String>:
+  val chars = chars(s)
+
+  skip(chars, start)
+  if empty?(chars) == true:
+    return Utf8String("", 0)
+  val start-offset = chars.offset
+  
+  skip(chars, end)
+  if empty?(chars) == true:
+    return Utf8String(addr!(s.bytes[start-offset]), s.length - start-offset)
+  val end-offset = chars.offset
+
+  return Utf8String(addr!(s.bytes[start-offset]), end-offset - start-offset)
+
+lostanza defn substr (s: ref<Utf8String>, start: long) -> ref<Utf8String>:
+  return substr(s, start, LONG-MAX.value)
+
+lostanza defn substr (s: ref<Utf8String>, start: ref<Long>) -> ref<Utf8String>:
+  return substr(s, start.value)
+
+lostanza defn substr (s: ref<Utf8String>, start: ref<Long>, end: ref<Long>) -> ref<Utf8String>:
+  return substr(s, start.value, end.value)
+
+lostanza defn substr (s: ref<Utf8String>, start: ref<Int>) -> ref<Utf8String>:
+  return substr(s, start.value)
+
+lostanza defn substr (s: ref<Utf8String>, start: ref<Int>, end: ref<Int>) -> ref<Utf8String>:
+  return substr(s, start.value, end.value)
+
+lostanza defn prefix? (string: ref<Utf8String>, prefix: ref<Utf8String>) -> ref<True|False>:
+  labels:
+    begin:
+      goto loop(bytes(string), bytes(prefix))
+    loop (string: ref<Bytes>, prefix: ref<Bytes>):
+      if empty?(prefix) == true:
+        return true
+      if empty?(string) == true:
+        return false
+      else:
+        if next(string) != next(prefix):
+          return false
+        goto loop(string, prefix)
+
+lostanza defn ascii-to-utf8 (s: ref<String>) -> ref<Utf8String>:
+  return Utf8String(addr!(s.chars), length(s).value)
+
+lostanza defn append (a: ref<Utf8String>, b: ref<Utf8String>) -> ref<Utf8String>:
+  val new-string = new Utf8String{a.length + b.length}
+  call-c clib/memcpy(addr!(new-string.bytes), addr!(a.bytes), a.length)
+  call-c clib/memcpy(addr!(new-string.bytes[a.length]), addr!(b.bytes), b.length)
+  return new-string
